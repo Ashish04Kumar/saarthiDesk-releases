@@ -76,17 +76,34 @@ command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database -q
 say "Added Saarthi to your app menu"
 
 # ---------- system libraries the window needs ----------
-LIBS="$(ldconfig -p 2>/dev/null || true)"
+LDCONFIG="$(command -v ldconfig || true)"
+[[ -z "$LDCONFIG" && -x /sbin/ldconfig ]] && LDCONFIG=/sbin/ldconfig      # Debian keeps it off the user PATH
+[[ -z "$LDCONFIG" && -x /usr/sbin/ldconfig ]] && LDCONFIG=/usr/sbin/ldconfig
+LIBS="$([[ -n "$LDCONFIG" ]] && "$LDCONFIG" -p 2>/dev/null || true)"
 missing=()
-for lib in libxcb-cursor.so.0 libxkbcommon-x11.so.0 libEGL.so.1 libfontconfig.so.1 libdbus-1.so.3; do
-  [[ "$LIBS" == *"$lib"* ]] || missing+=("$lib")
-done
+if [[ -n "$LIBS" ]]; then  # can't tell? don't guess
+  for lib in libxcb-cursor.so.0 libxkbcommon-x11.so.0 libEGL.so.1 libfontconfig.so.1 libdbus-1.so.3; do
+    [[ "$LIBS" == *"$lib"* ]] || missing+=("$lib")
+  done
+fi
 if (( ${#missing[@]} )); then
-  warn "A few system libraries are missing: ${missing[*]}. Install them with:"
-  if command -v apt >/dev/null; then echo "    sudo apt install -y libxcb-cursor0 libxkbcommon-x11-0 libegl1 libfontconfig1 libdbus-1-3"
-  elif command -v dnf >/dev/null; then echo "    sudo dnf install -y xcb-util-cursor libxkbcommon-x11 mesa-libEGL fontconfig dbus-libs"
-  elif command -v pacman >/dev/null; then echo "    sudo pacman -S --needed xcb-util-cursor libxkbcommon-x11 libglvnd fontconfig dbus"
-  elif command -v zypper >/dev/null; then echo "    sudo zypper install libxcb-cursor0 libxkbcommon-x11-0 libEGL1 fontconfig libdbus-1-3"
+  if command -v apt >/dev/null; then LIBCMD="sudo apt install -y libxcb-cursor0 libxkbcommon-x11-0 libegl1 libfontconfig1 libdbus-1-3"
+  elif command -v dnf >/dev/null; then LIBCMD="sudo dnf install -y xcb-util-cursor libxkbcommon-x11 mesa-libEGL fontconfig dbus-libs"
+  elif command -v pacman >/dev/null; then LIBCMD="sudo pacman -S --needed --noconfirm xcb-util-cursor libxkbcommon-x11 libglvnd fontconfig dbus"
+  elif command -v zypper >/dev/null; then LIBCMD="sudo zypper install -y libxcb-cursor0 libxkbcommon-x11-0 libEGL1 fontconfig libdbus-1-3"
+  else LIBCMD=""
+  fi
+  warn "Saarthi's window needs a few system libraries that are missing: ${missing[*]}"
+  answer="n"
+  if [[ -n "$LIBCMD" && -r /dev/tty ]]; then
+    printf '    Install them now with:  %s\n    [Y/n] ' "$LIBCMD"
+    read -r answer < /dev/tty || answer="n"
+    answer="${answer:-y}"
+  fi
+  if [[ "$answer" =~ ^[Yy] ]]; then
+    $LIBCMD || warn "Couldn't install them. Run this yourself:  $LIBCMD"
+  elif [[ -n "$LIBCMD" ]]; then
+    warn "Run this, then start Saarthi from the app menu:  $LIBCMD"
   fi
 fi
 
@@ -104,6 +121,30 @@ if (( AUTOSTART )); then
   say "Saarthi will start with your computer"
 fi
 
-case ":$PATH:" in *":$BIN_DIR:"*) ;; *) warn "Add ~/.local/bin to your PATH to use the 'saarthi' command." ;; esac
+# ---------- make the `saarthi` command work in new terminals ----------
+case ":$PATH:" in
+  *":$BIN_DIR:"*) ;;
+  *)
+    for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
+      if [[ -f "$rc" ]] && ! grep -q 'saarthi: ~/.local/bin' "$rc"; then
+        printf '\n# saarthi: ~/.local/bin on PATH\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$rc"
+      fi
+    done
+    warn "Open a new terminal to use the 'saarthi' command (or run: export PATH=\"\$HOME/.local/bin:\$PATH\")" ;;
+esac
+
+# ---------- start it, and make sure it really started ----------
+"$APP_DIR/saarthi" --quit >/dev/null 2>&1 || true
+LOG="$DATA/saarthi/last-start.log"
 say "Starting Saarthi 🎉  (double-click it for reminders & notes, right-click for the menu)"
-nohup "$APP_DIR/saarthi" >/dev/null 2>&1 &
+nohup "$APP_DIR/saarthi" >"$LOG" 2>&1 &
+sleep 5
+if pgrep -f "$APP_DIR/saarthi" >/dev/null 2>&1; then
+  say "Saarthi is running. Look at the bottom-right of your screen."
+else
+  warn "Saarthi didn't stay open. Last messages:"
+  grep -v '^qt.qpa.theme\|portal' "$LOG" | tail -5 | sed 's/^/    /'
+  if grep -q 'xcb' "$LOG"; then
+    warn "This is the missing-library problem above. Install them, then open Saarthi from the app menu."
+  fi
+fi
